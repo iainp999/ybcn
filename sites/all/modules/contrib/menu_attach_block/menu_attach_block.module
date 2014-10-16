@@ -1,0 +1,323 @@
+<?php
+
+/**
+ * @file
+ * Module to enable adding a block to menu item.
+ *
+ * This allows an admin to select a block for a menu item as well as, or
+ * instead of, a title and link. When the link is rendered, the block is
+ * inserted in the containing element after the <a> tag.
+ *
+ *  Based heavily on menu_views.module.
+ *
+ * @link http://drupal.org/project/menu_views @endlink
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function menu_attach_block_menu() {
+  return array(
+    '<block>' => array(
+      'page callback' => 'drupal_not_found',
+      'access callback' => TRUE,
+      'type' => MENU_CALLBACK,
+    ),
+  );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function menu_attach_block_theme() {
+  return array(
+    'menu_attach_block_wrapper' => array(
+      'template' => 'menu_attach_block_wrapper',
+      'arguments' => array('content' => NULL, 'orientation' => NULL),
+    ),
+  );
+}
+
+/**
+ * Override theme_link().
+ *
+ * Render a block inside a link.
+ *
+ * @todo Implement a theme function to do the render.
+ *
+ * @param array $variables
+ *   Array of theme variables as would be passed to theme_link().
+ *
+ * @return string
+ *   HTML for a link with an attached block.
+ */
+function menu_attach_block_link(&$variables) {
+  $block = FALSE;
+  $options = $variables['options'];
+
+  if (isset($options['menu_attach_block']) && !empty($options['menu_attach_block']['name'])) {
+    $block = menu_attach_block_load_from_key($options['menu_attach_block']['name']);
+  }
+
+  // Render a block if one is attached to this link.
+  if ($block) {
+    $link = '';
+    // Render the link with the block content afterwards.
+    if ($variables['path'] != '<block>') {
+      // Build the link manually instead of using l() to avoid getting caught in
+      // theme_link() again.
+      $link = '<a href="' . check_plain(url($variables['path'], $variables['options'])) . '"' . drupal_attributes($variables['options']['attributes']) . '>' . ($variables['options']['html'] ? $variables['text'] : check_plain($variables['text'])) . '</a>';
+      $attributes = array(
+        'class' => 'menu-attach-block-drop-link',
+        'id' => $variables['path'] . '-drop-link-' . $variables['options']['menu_attach_block']['mlid'],
+      );
+      // Pass a space as the fragment parameter to get a <a href='# '> link.
+      // @link http://bit.ly/zZXArS @endlink
+      $l_options = array(
+        'fragment' => ' ',
+        'external' => TRUE,
+        'attributes' => $attributes,
+      );
+      $link .= PHP_EOL . l(t('More'), '', $l_options);
+    }
+    // Get the block html.
+    $block_output = menu_attach_block_block_render($block['module'], $block['delta']);
+    if (!empty($block_output)) {
+
+      $variables = array(
+        'orientation' => $options['menu_attach_block']['orientation'],
+        'content' => $block_output,
+      );
+      $block_output = theme('menu_attach_block_wrapper', $variables);
+      return $link . $block_output;
+    }
+  }
+
+  // Otherwise, pass through to the original theme function.
+  return theme('menu_attach_block_link_default', $variables);
+}
+
+/**
+ * Processes variables for menu_attach_block.tpl.php.
+ *
+ * @param array $variables
+ *   Array of theme variables, with members:
+ *    - content: HTML of embedded block.
+ *    - orientation: Menu orientation: either horizontal or vertical.
+ */
+function template_preprocess_menu_attach_block_wrapper(&$variables) {
+  // Add new CSS classes to be processed by template_process. This allows for
+  // other preprocess functions to easily alter the list of classes for the
+  // wrapper before they are output.
+  $variables['classes_array'][] = drupal_html_class('orientation-' . $variables['orientation']);
+}
+
+/**
+ * Implements hook_preprocess_HOOK().
+ */
+function menu_attach_block_preprocess_links(&$variables) {
+  $attached_block = FALSE;
+  // Very quick hacky check to prevent notices on install.
+  // @todo Investigate in more detail.
+  if (array_key_exists('links', $variables) && is_array($variables['links']) && count($variables['links'])) {
+    foreach ($variables['links'] as $key => &$link) {
+      if (
+        is_array($link) &&
+        array_key_exists('menu_attach_block', $link) &&
+        empty($link['menu_attach_block']['name']) == FALSE
+      ) {
+        $attached_block = TRUE;
+
+        $link['attributes']['class'][] = 'attached-block';
+        // Rebuild the keys of the array, preserving the order. Array keys are
+        // used for keys in the li element of link lists - @see theme_links.
+        $new_links[$key . ' attached-block'] = $link;
+      }
+      else {
+        $new_links[$key] = $link;
+      }
+    }
+    if ($attached_block) {
+      $variables['links'] = $new_links;
+    }
+  }
+}
+
+/**
+ * Implements hook_theme_registry_alter().
+ *
+ * Intercepts hook_link().
+ */
+function menu_attach_block_theme_registry_alter(&$registry) {
+  // Save previous value from registry in case another module/theme
+  // overwrites link.
+  $registry['menu_attach_block_link_default'] = $registry['link'];
+  $registry['link']['function'] = 'menu_attach_block_link';
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Appends the attached view to the title of the menu item.
+ */
+function menu_attach_block_form_menu_overview_form_alter(&$form, &$form_state) {
+  $elements = element_children($form);
+
+  foreach ($elements as $mlid) {
+    $element = &$form[$mlid];
+    $block = array();
+    // Only process menu items.
+    if (isset($element['#item'])) {
+      $item = &$element['#item'];
+      $options = $item['options'];
+      if (isset($options['menu_attach_block']) && !empty($options['menu_attach_block']['name'])) {
+        $block = menu_attach_block_load_from_key($options['menu_attach_block']['name'], 'info');
+        if ($block !== FALSE) {
+          $info = $block[$block['delta']]['info'];
+          $title = '';
+          if ($item['link_path'] != '<block>') {
+            // Manually create the link, otherwise it will be caught by
+            // menu_attach_block_link().
+            $title = '<a href="' . check_url(url($item['href'], $item['localized_options'])) . '"' . drupal_attributes($item['localized_options']['attributes']) . '>' . check_plain($item['title']) . '</a> ';
+          }
+          $link = l($info, 'admin/structure/block/manage/' . $block['module'] . '/' . $block['delta'] . '/configure');
+          $element['title']['#markup'] = $title . '<div class="messages status block">Attached block:  ' . $link . ' </div>';
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Inserts a block selector.
+ */
+function menu_attach_block_form_menu_edit_item_alter(&$form, &$form_state) {
+  if (isset($form['link_path']['#description'])) {
+    $form['link_path']['#description'] .= ' ' . t('Enter %block to disable the link and display only the attached block.', array('%block' => '<block>'));
+  }
+  $form['menu_attach_block'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Attach block'),
+    '#description' => t('Choose a block to be rendered as part of this menu item.'),
+    '#collapsible' => FALSE,
+    '#collapsed' => FALSE,
+    '#prefix' => '<div id="menu-block">',
+    '#suffix' => '</div>',
+    '#tree' => TRUE,
+  );
+  $options = array();
+  // @todo Change to use code similar to that in block_admin_display().
+  $blocks = _block_rehash();
+
+  foreach ($blocks as $block) {
+    $options[$block['module'] . '|' . $block['delta']] = $block['info'];
+  }
+  asort($options);
+  $form['menu_attach_block']['name'] = array(
+    '#type' => 'select',
+    '#title' => t('Block'),
+    '#empty_option' => t('- None -'),
+    '#description' => t('Select a block to attach.'),
+    '#default_value' => isset($form['options']['#value']['menu_attach_block']['name']) ? $form['options']['#value']['menu_attach_block']['name'] : '',
+    '#options' => $options,
+  );
+
+  $form['menu_attach_block']['orientation'] = array(
+    '#type' => 'select',
+    '#title' => t('Menu orientation'),
+    '#default_value' => isset($form['options']['#value']['menu_attach_block']['name']) ? $form['options']['#value']['menu_attach_block']['name'] : 'horizontal',
+    '#options' => array('horizontal' => t('Horizontal'), 'vertical' => t('Vertical')),
+  );
+  // Inject handlers.
+  $form['#validate'] = array_merge(array('menu_attach_block_menu_edit_item_validate'), $form['#validate']);
+  $form['#submit'] = array_merge(array('menu_attach_block_menu_edit_item_submit'), $form['#submit']);
+}
+
+/**
+ * Validate handler for menu_edit_item form.
+ */
+function menu_attach_block_menu_edit_item_validate($form, &$form_state) {
+  // Only run this validation when the form is fully submitted.
+  if ($form_state['submitted']) {
+    if ($form_state['values']['link_path'] == '<block>' && $form_state['values']['menu_attach_block']['name'] == '') {
+      form_set_error('menu_attach_block][name', t('The link path has been set to %block. You must select a block to attach to this menu item.', array('%block' => '<block>')));
+    }
+  }
+}
+
+/**
+ * Submit handler for menu_edit_item form.
+ *
+ * @todo Handle removal of block attachments from menu items.
+ */
+function menu_attach_block_menu_edit_item_submit($form, &$form_state) {
+  // Save menu_attach_blocks values in the links options.
+  $values = &$form_state['values'];
+  if (isset($values['menu_attach_block'])) {
+    $values['menu_attach_block']['mlid'] = $values['original_item']['mlid'];
+    $values['menu_attach_block']['plid'] = $values['original_item']['plid'];
+    $values['options']['menu_attach_block'] = $values['menu_attach_block'];
+  }
+
+
+  unset($values['menu_attach_block']);
+}
+
+/**
+ * Loads a block object using a menu_attach_block key.
+ *
+ * Block references are saved in the menu object in the format module|delta.
+ *
+ * @param string $key
+ *   Key as saved by the menu admin form, in the format module|delta.
+ * @param string $hook
+ *   name of hook_block implementation to call to get extra data about a block.
+ *   Do not include the 'block_' prefix.
+ *
+ * @return array
+ *   Fully loaded block array.
+ *
+ * @see http://api.drupal.org/api/search/7/hook_block
+ */
+function menu_attach_block_load_from_key($key, $hook = FALSE) {
+  $block = (array) call_user_func_array('block_load', explode('|', $key));
+  // If no 'theme' key is set, then there is no such block.
+  if (!array_key_exists('theme', $block)) {
+    return FALSE;
+  }
+  if ($hook) {
+    // Hack for hook_block_info for blocks with numeric keys.
+    if ($hook === 'info' && is_numeric($block['delta'])) {
+      $info = module_invoke($block['module'], 'block_info', $block['delta']);
+      $info = $info[$block['delta']];
+      $block[$block['delta']] = $info;
+    }
+    else {
+      $block = array_merge($block, (array) module_invoke($block['module'], 'block_' . $hook, $block['delta']));
+    }
+  }
+  return $block;
+}
+
+/**
+ * Helper function to render a block's HTML.
+ *
+ * @param string $module
+ *   Name of module that implements the block.
+ * @param string $delta
+ *   Unique ID of the block.
+ *
+ * @return string
+ *   HTML of rendered block.
+ *
+ * @see http://drupal.org/node/26502#comment-4705330
+ */
+function menu_attach_block_block_render($module, $delta) {
+  $block = block_load($module, $delta);
+  $block_content = _block_render_blocks(array($block));
+  $build = _block_get_renderable_array($block_content);
+  $block_rendered = drupal_render($build);
+  return $block_rendered;
+}
